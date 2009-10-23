@@ -1,0 +1,15 @@
+<?php
+// $Id$
+
+/**
+ * Implements @hook_install
+ */
+function sipapi_install() {
+  variable_set('sipapi_last_message', '');
+  variable_set('sipapi_verbose', 'FALSE');
+}
+
+function sipapi_uninstall() {
+  variable_del('sipapi_last_message');
+  variable_del('sipaipi_verbose');
+}

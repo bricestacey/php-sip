@@ -1,0 +1,1479 @@
+<?php
+// $Id$
+
+/**
+ * Create a socket and inititate connection on that socket.
+ *
+ * @param $host
+ *  the hostname to connect to.
+ * @param $port
+ *  the port to connect to.
+ *
+ * @return
+ *  the socket that is created on success or FALSE on failure.
+ */
+function sipapi_connect($host, $port) {
+  static $socket;
+
+  $address = gethostbyname($host);
+  $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+  if ($socket === FALSE) {
+    echo "socket_create() failed: reason: " . socket_strerror(socket_last_error()) . "\n";
+  }
+  $result = socket_connect($socket, $address, $port);
+  if ($result === FALSE) {
+    echo "socket_connect() failed.\nReason: ($result) " . socket_strerror(socket_last_error($socket)) . "\n";
+    return FALSE;
+  }
+
+  return $socket;
+}
+
+/**
+ *
+ */
+function sipapi_send_message($socket, $msg) {
+  if (sipapi_send($socket, $msg) == 0) {
+    $msg = sipapi_recv($socket);
+    $obj['msg'] = $msg;
+    $obj['parse'] = sipapi_parse($msg);
+    return $obj;
+  } else {
+    return FALSE;
+  }
+}
+
+/**
+ * Send data to a connected socket.
+ *
+ * @param $msg
+ *  the data to be sent to the socket.
+ *
+ * @return
+ *  0 on success, or -1 on error.
+ */
+function sipapi_send($socket, $msg) {
+  if (!$socket) {
+    return -1;
+  }
+
+  $len = $bytesleft = strlen($msg);
+  $total = 0;
+  $n = 0;
+  $buffer = '';
+
+  while($total < $len) {
+    $n = socket_write($socket, substr($msg, $total), $bytesleft);
+    if ($n == -1) { break; }
+    $total += $n;
+    $bytesleft -= $n;
+  }
+
+  if (variable_get('sipapi_verbose', 'FALSE') === TRUE) {
+    print "Send: $msg\n";
+  }
+
+  return ($n == -1) ? -1 : 0; // return -1 on failure, 0 on success
+}
+
+/**
+ * Read data from the socket created by sipapi_connect() funnction.
+ *
+ * @param $length
+ *  The maximum number of bytes read is specified by the length parameter.
+ *
+ * @return
+ *  the data as a string on success, or FALSE on error.
+ *  *****ON ERROR IS NOT TRUE*********
+ */
+function sipapi_recv($socket) {
+  $msg = socket_read($socket, 1000000, PHP_NORMAL_READ);
+  variable_set('sipapi_last_message', $msg);
+
+  if (variable_get('sipapi_verbose', 'FALSE') === TRUE) {
+    print "Recv: $msg\n";
+  }
+
+  return $msg;
+}
+
+function sipapi_get_last_message() {
+  $msg = variable_get('sipapi_last_message', $msg);
+  $obj['msg'] = $msg;
+  $obj['parse'] = sipapi_parse($msg);
+
+  return $obj;
+}
+
+/**
+ * Parse a SIP message into an associative array.
+ *
+ * This method acts as an abstraction for the specific messages. This method 
+ * should be called by other classes, reserving the message-specific method 
+ * calls to internal use only.
+ *
+ * @see sipapi_parse_msg10()
+ * @see sipapi_parse_msg12()
+ * @see sipapi_parse_msg16()
+ * @see sipapi_parse_msg18()
+ * @see sipapi_parse_msg20()
+ * @see sipapi_parse_msg24()
+ * @see sipapi_parse_msg26()
+ * @see sipapi_parse_msg30()
+ * @see sipapi_parse_msg36()
+ * @see sipapi_parse_msg38()
+ * @see sipapi_parse_msg64()
+ * @see sipapi_parse_msg66()
+ * @see sipapi_parse_msg94()
+ * @see sipapi_parse_msg96()
+ * @see sipapi_parse_msg98()
+ *
+ * @param $msg
+ *  a message from the Standard Interchange Protocol (SIP)
+ *
+ * @return
+ *  an associative array representing the given message.
+ *  FALSE on failure.
+ */
+function sipapi_parse($msg) {
+  $id = substr($msg, 0, 2);
+  switch ($id) {
+    // Checkin response
+    case 10: 
+      return sipapi_parse_msg10($msg);
+    // Checkout response
+    case 12: 
+      return sipapi_parse_msg12($msg);
+    // Hold response
+    case 16: 
+      return sipapi_parse_msg16($msg);
+    // Item Information response
+    case 18: 
+      return sipapi_parse_msg18($msg);
+    // Item Status Update Response
+    case 20: 
+      return sipapi_parse_msg20($msg);
+    // Patron Status Request Response
+    case 24: 
+      return sipapi_parse_msg24($msg);
+    // Patron Enable Response
+    case 26: 
+      return sipapi_parse_msg26($msg);
+    // Renew Response
+    case 30: 
+      return sipapi_parse_msg30($msg);
+    // End Patron Session Response
+    case 36: 
+      return sipapi_parse_msg36($msg);
+    // Fee Paid Response 
+    case 38: 
+      return sipapi_parse_msg38($msg);
+    // Patron Information response
+    case 64: 
+      return sipapi_parse_msg64($msg);
+    // Renew All Response
+    case 66:
+      return sipapi_parse_msg66($msg);
+    // Login Response
+    case 94:
+      return sipapi_parse_msg94($msg);
+    // Request SC Resend
+    case 96:
+      return sipapi_parse_msg96($msg);
+    // Request ACS Resend Response
+    case 98:
+      return sipapi_parse_msg98($msg);
+    default:
+      return FALSE;
+  }
+  return FALSE;
+}
+
+/** 
+ * Format a Block Patron (Message 01).
+ *
+ * This message requests that the patron card be blocked. In Voyager, this sets
+ * the barcode's status to Other. The server must respond to this command 
+ * with a Patron Status Response Message (24).
+ *
+ * @see parse()
+ * @see parse_msg24()
+ *
+ * @param $fields
+ *  Array of fields. The following are required keys:
+ * - CardRetained (Y or N)
+ * - AO (Institution Id)
+ * - AL (Block Card Message)
+ * - AA (Patron Identifier)
+ * - AC (Terminal Password)
+ *
+ * @return
+ *  a formatted string of Block Patron message.
+ */
+function sipapi_msg01($fields) {
+  if (!isset($fields['CardRetained'], $fields['AO'], $fields['AL'], $fields['AA'], $fields['AC']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '01';
+  $msg .= $fields['CardRetained'];
+  $msg .= date('Ymd    His');
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AL' . $fields['AL'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+  $msg .= 'AC' . $fields['AC'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+/**
+ * Format a Checkin (Message 09)
+ *
+ * This message is used to request to check in an item, and also to cancel 
+ * a Checkout request that did not successfully complete. The server 
+ * must respond to this command with a Checkin Response message (10).
+ *
+ * @see parse()
+ * @see parse_msg10()
+ *
+ * @param $fields
+ *  Array of fields. The following are required keys:
+ * - NoBlock (Y or N)
+ * - AP (Current Location)
+ * - AO (Institution Id)
+ * - AB (Item Identifier)
+ * - AC (Terminal Password)
+ *
+ * @return
+ *  a formatted string of Checkin message.
+ */
+function sipapi_msg09($fields) {
+  if (!isset($fields['NoBlock'], $fields['AP'], $fields['AO'], $fields['AB'], $fields['AC']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '09';
+  $msg .= $fields['NoBlock'];
+  $msg .= date('Ymd    His');
+  $msg .= (isset($fields['ReturnDate'])) ? $fields['ReturnDate'] : date('Ymd    His');
+  $msg .= 'AP' . $fields['AP'] . '|';
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AB' . $fields['AB'] . '|';
+  $msg .= 'AC' . $fields['AC'] . '|';
+  
+  // Optional Fields
+  if (isset($fields['CH']))
+    $msg .= 'CH' . $fields['CH'] . '|';
+
+  if (isset($fields['BI']))
+    $msg .= 'BI' . $fields['BI'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+
+/**
+ * Format a Checkout (Message 11).
+ * 
+ * This message is used to request to checkout an item, and also to cancel a 
+ * Checkin request that did not successfully complete. The server must 
+ * respond to this command with a Checkout Response message (12).
+ *
+ * @see parse()
+ * @see parse_msg12()
+ *
+ * @param $fields
+ *  Array of fields. The following are required keys:
+ * - SCRenewalPolicy (Y or N)
+ * - NoBlock (Y or N)
+ * - NBDueDate (18-char, YYYYMMDDZZZZHHMMSS)
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ * - AB (Item Identifier)
+ * - AC (Terminal Password)
+ *
+ * @return
+ *  a formatted string of Checkout message.
+ */
+function sipapi_msg11($fields) {
+  if (!isset($fields['SCRenewalPolicy'], $fields['NoBlock'], 
+      $fields['NBDueDate'], $fields['AO'], $fields['AA'], $fields['AB'], 
+      $fields['AC']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '11';
+  $msg .= $fields['SCRenewalPolicy'];
+  $msg .= $fields['NoBlock'];
+  $msg .= date('Ymd    His');
+  $msg .= $fields['NBDueDate'];
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+  $msg .= 'AB' . $fields['AB'] . '|';
+  $msg .= 'AC' . $fields['AC'] . '|';
+
+  // Optional Fields
+  if (isset($fields['CH']))
+    $msg .= 'CH' . $fields['CH'] . '|';
+
+  if (isset($fields['AD']))
+    $msg .= 'AD' . $fields['AD'] . '|';
+
+  if (isset($fields['BO']))
+    $msg .= 'BO' . $fields['BO'] . '|';
+
+  if (isset($fields['BI']))
+    $msg .= 'BI' . $fields['BI'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format a Hold (Message 15).
+ *
+ * This message is used to create, modify, or delete a hold. The server 
+ * should respond with a Hold Response (Message 16). Either or both the 
+ * "Item identifier" and "title identifier" must be present for the message 
+ * to be useful.
+ *
+ * Voyager Specific Information:
+ *  Voyager does not seem to support this
+ *
+ * @see parse()
+ * @see parse_msg16()
+ *
+ * @param $fields
+ *  An array of fields. The following keys are required:
+ * - HoldMode (Add '+', Delete '-', Change '*')
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ *
+ * @return
+ *  a formatted string of the Hold message.
+ */
+function sipapi_msg15($fields) {
+  if (!isset($fields['HoldMode'], $fields['AO'], $fields['AA']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '15';
+  $msg .= $fields['HoldMode'];
+  $msg .= date('Ymd    His');
+
+  // Optional Fields
+  // The SIP document rev 2.12 has these optional fields prior
+  // to the required fields. I don't know why. But I mimic.
+  if (isset($fields['BW']))
+    $msg .= 'BW' . $fields['BW'] . '|';
+  if (isset($fields['BS']))
+    $msg .= 'BS' . $fields['BS'] . '|';
+  if (isset($fields['BY']))
+    $msg .= 'BY' . $fields['BY'] . '|';
+
+  // Required Fields
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+
+  // Voyager's response to this message (16) adds MA and MB fields.
+  // What is set in MA is returned in 16 as MA as well. Not sure its use.
+  // 
+  //  if (isset($fields['MA']))
+  //    $msg .= 'MA' . $fields['MA'] . '|';
+  //
+  //  if (isset($fields['MB']))
+  //    $msg .= 'MB' . $fields['MB'] . '|';
+
+  // Optional Fields
+  if (isset($fields['AD']))
+    $msg .= 'AD' . $fields['AD'] . '|';
+
+  if (isset($fields['AB']))
+    $msg .= 'AB' . $fields['AB'] . '|';
+
+  if (isset($fields['AJ']))
+    $msg .= 'AJ' . $fields['AJ'] . '|';
+
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+
+  if (isset($fields['BO']))
+    $msg .= 'BO' . $fields['BO'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format an Item Information (Message 17)
+ *
+ * This message may be used to request item information. The server should
+ * respond with the Item Information Response (Message 18).
+ *
+ * @see parse()
+ * @see parse_msg18()
+ *
+ * @param $fields
+ *  An array of fields. The following keys are required:
+ * - AO (Institution Id)
+ * - AB (Item Identifier)
+ *
+ * @return
+ *  a formatted string of the Item Information message.
+ */
+function sipapi_msg17($fields) {
+  if (!isset($fields['AO'], $fields['AB']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '17';
+  $msg .= date('Ymd    His');
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AB' . $fields['AB'] . '|';
+
+  // Optional Fields
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format an Item Status Update (Message 19)
+ *
+ * This message can be used to send item information to the server, without
+ * having to do a Checkout or Checkin operation. The items properties could be
+ * stored on the SIP's database. The server should respond with an Item
+ * Status Update Response message (20).
+ *
+ * Voyager specific notes:
+ *  Voyager does not seem to support this
+ *
+ * @see parse()
+ * @see parse_msg20()
+ *
+ * @param $fields
+ *   An array of fields. The following keys are required:
+ * - AO (Institution Id)
+ * - AB (Item Identifier)
+ *
+ * @return
+ *  a formatted string of the Item Status Update message.
+ */
+function sipapi_msg19($fields) {
+  if (!isset($fields['AO'], $fields['AB']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '19';
+  $msg .= date('Ymd    His');
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AB' . $fields['AB'] . '|';
+  
+  // Optional Fields
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+
+  if (isset($fields['CH']))
+    $msg .= 'CH' . $fields['CH'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format a Patron Status Request (Message 23)
+ *
+ * This message is used to request patron information. The server must respond 
+ * to this command with a Patron Status Response message (24).
+ *
+ * @see parse()
+ * @see parse_msg24()
+ *
+ * @param $fields
+ *  An array of fields. The following keys are required:
+ * - Language
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ * - AC (Terminal Password)
+ * - AD (Patron Password)
+ *
+ * @return
+ *  a formatted string of the Patron Status Request message.
+ */
+function sipapi_msg23($fields) {
+  if (!isset($fields['Language'], $fields['AO'], $fields['AA'], $fields['AC'], $fields['AD']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '23';
+  $msg .= $fields['Language'];
+  $msg .= date('Ymd    His');
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+  $msg .= 'AC' . $fields['AC'] . '|';
+  $msg .= 'AD' . $fields['AD'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format a Patron Enable (Message 25)
+ *
+ * This message can be used to re-enable canceled patrons. It should only be 
+ * used for system testing and validation. The server should respond with a 
+ * Patron Enable Response (Message 26).
+ *
+ * Voyager specific information:
+ * - Voyager does not seem to support this
+ *
+ * @see parse()
+ * @see parse_msg26()
+ *
+ * @param $fields
+ *  An array of fields. The following keys are required:
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ *
+ * @return
+ *  a formatted string of Patron Enable message.
+ */
+function sipapi_msg25($fields) {
+  if (!isset($fields['AO'], $fields['AA']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '25';
+  $msg .= date('Ymd    His');
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+
+  // Optional Fields
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+
+  if (isset($fields['AD']))
+    $msg .= 'AD' . $fields['AD'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format a Renew (Message 29)
+ *
+ * This messgae is used to renew an item. The server should respond with a 
+ * Renew Response (Message 30). Either or both of the "item identifier" and 
+ * "title identifier" fields must be present for the message to be useful.
+ *
+ * @see parse()
+ * @see parse_msg30()
+ *
+ * @param $fields
+ *  an array of fields. The following keys are required:
+ * - ThirdPartyAllowed
+ * - NoBlock
+ * - NBDueDate
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ *
+ * @return
+ *  a formatted string of Renew message.
+ */
+function sipapi_msg29($fields) {
+  if (!isset($fields['ThirdPartyAllowed'], $fields['NoBlock'], $fields['NBDueDate'], $fields['AO'], $fields['AA']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '29';
+  $msg .= $fields['NoBlock'];
+  $msg .= date('Ymd    His');
+  $msg .= $fields['NBDueDate'];
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+
+  // Optional Fields
+  if (isset($fields['AD']))
+    $msg .= 'AD' . $fields['AD'] . '|';
+  if (isset($fields['AB']))
+    $msg .= 'AB' . $fields['AB'] . '|';
+  if (isset($fields['AJ']))
+    $msg .= 'AJ' . $fields['AJ'] . '|';
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+  if (isset($fields['CH']))
+    $msg .= 'CH' . $fields['CH'] . '|';
+  if (isset($fields['BO']))
+    $msg .= 'BO' . $fields['BO'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format an End Patron Session (Message 35)
+ *
+ * This message will be sent when a patron has completed all of their 
+ * transactions. The server may, upon receipt of this command, close any open 
+ * files or deallocate data structures pertaining to that patron. The server 
+ * should respond with an End Session Response (Message 36).
+ * 
+ * @see parse()
+ * @see parse_msg36()
+ *
+ * @param $fields
+ *  an array of fields. The following keys are required:
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ *
+ * @return
+ *  a formatted string of End Patron Session message.
+ */
+function sipapi_msg35($fields) {
+  if (!isset($fields['AO'], $fields['AA']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '35';
+  $msg .= date('Ymd    His');
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+
+  // Optional Fields
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+
+  if (isset($fields['AD']))
+    $msg .= 'AD' . $fields['AD'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format a Fee Paid (Message 37)
+ *
+ * This message can be used to notify the server that a fee has been collected 
+ * from the patron. The server should record this information in its database 
+ * and respond with a Fee Paid Response (Message 38).
+ *
+ * Voyager specific information:
+ * - Voyager does not seem to support this
+ *
+ * @see parse()
+ * @see parse_msg38()
+ *
+ * @param $fields
+ *  an array of fields. The following keys are required:
+ * - FeeType
+ * - PaymentType
+ * - CurrencyType
+ * - BV
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ *
+ * @return
+ *  a formatted string of Fee Paid message.
+ */
+function sipapi_msg37($fields) {
+  if (!isset($fields['FeeType'], $fields['PaymentType'], $fields['CurrencyType'], $fields['BV'], $fields['AO'], $fields['AA']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '37';
+  $msg .= date('Ymd    His');
+  $msg .= $fields['FeeType'];
+  $msg .= $fields['PaymentType'];
+  $msg .= $fields['CurrencyType'];
+  $msg .= 'BV' . $fields['BV'] . '|';
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+
+  // Optional Fields
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+
+  if (isset($fields['AD']))
+    $msg .= 'AD' . $fields['AD'] . '|';
+
+  if (isset($fields['CG']))
+    $msg .= 'CG' . $fields['CG'] . '|';
+
+  if (isset($fields['BK']))
+    $msg .= 'BK' . $fields['BK'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format a Patron Information (Message 63)
+ *
+ * This message is a superset of the Patron Status Request message. It should 
+ * be used to request patron information. The server should respond with the 
+ * Patron Information Response (Message 64).
+ *
+ * @see parse()
+ * @see parse_msg64()
+ *
+ * @param $fields
+ *  An array of fields. The following keys are required:
+ * - Language
+ * - Summary
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ *
+ * @return
+ *  a formatted string of a Patron Information message.
+ */
+function sipapi_msg63($fields) {
+  if (!isset($fields['Language'], $fields['Summary'], $fields['AO'], $fields['AA']))
+    return FALSE;
+
+  $msg = '63';
+  $msg .= $fields['Language'];
+  $msg .= date('Ymd    His');
+
+  switch ($fields['Summary']) {
+    case 'Available':
+      $msg .= 'Y         ';
+      break;
+    case 'Overdue':
+      $msg .= ' Y        ';
+      break;
+    case 'Charged':
+      $msg .= '  Y       ';
+      break;
+    case 'Fine':
+      $msg .= '   Y      ';
+      break;
+    case 'Recall':
+      $msg .= '    Y     ';
+      break;
+    case 'Unavailable':
+      $msg .= '     Y    ';
+      break;
+    default:
+      $msg .= '          ';
+      break;
+  }
+
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+
+  // Optional Fields
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+
+  if (isset($fields['AD']))
+    $msg .= 'AD' . $fields['AD'] . '|';
+
+  if (isset($fields['BP']))
+    $msg .= 'BP' . $fields['BP'] . '|';
+
+  if (isset($fields['BQ']))
+    $msg .= 'BQ' . $fields['BQ'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format Renew All (Message 65)
+ *
+ * This message is used to renew all items that the patron has checked out. The 
+ * server should respond with a Renew All Response (Message 66).
+ *
+ * Voyager specific information:
+ * - Voyager does not seem to support this
+ *
+ * @see parse()
+ * @see parse_msg66()
+ *
+ * @param $fields
+ *  an array of fields. The following keys are required:
+ * - AO (Institution Id)
+ * - AA (Patron Identifier)
+ *
+ * @return
+ *  a formatted string of Renew All.
+ */
+function sipapi_msg65($fields) {
+  if (!isset($fields['AO'], $fields['AA']))
+    return FALSE;
+
+  // Required Fields
+  $msg = '65';
+  $msg .= date('Ymd    His');
+  $msg .= 'AO' . $fields['AO'] . '|';
+  $msg .= 'AA' . $fields['AA'] . '|';
+
+  // Optional Fields
+  if (isset($fields['AD']))
+    $msg .= 'AD' . $fields['AD'] . '|';
+  if (isset($fields['AC']))
+    $msg .= 'AC' . $fields['AC'] . '|';
+  if (isset($fields['BO']))
+    $msg .= 'BO' . $fields['BO'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+
+/**
+ * Format Login (Message 93)
+ *
+ * This message can be used to login to the server. The server should respond 
+ * with the Login Response (Messgae 94). When this message is used, it will be 
+ * the first message sent to the server. This message is generally required to
+ * use the other commands.
+ *
+ * @see parse()
+ * @see parse_msg94()
+ *
+ * @param
+ *  an array of fields. The following keys are required:
+ * - UIDAlgorithm
+ * - PWDAlgorithm
+ * - CN (User Id)
+ * - CO (User Password)
+ *
+ * @return
+ *  a formatted string of Login.
+ */
+function sipapi_msg93($fields) {
+  if (!isset($fields['UIDAlgorithm'], $fields['PWDAlgorithm'], $fields['CN'], $fields['CO']))
+    return FALSE;
+
+  // Required fields
+  $msg = '93';
+  $msg .= $fields['UIDAlgorithm'];
+  $msg .= $fields['PWDAlgorithm'];
+  $msg .= 'CN' . $fields['CN'] . '|';
+  $msg .= 'CO' . $fields['CO'] . '|';
+
+  // Optional fields
+  if (isset($fields['CP']))
+    $msg .= 'CP' . $fields['CP'] . '|';
+
+  // Message terminator
+  $msg .= "\r";
+  return $msg;
+}
+
+/**
+ * Format a Request Resend (Message 97)
+ *
+ * This message requests the server re-transmit its last message. It is sent by 
+ * the client to the server when the checksum in a received message does not 
+ * match the value claculated by the client. The server should respond by 
+ * re-transmitting its last message. This message should never include a 
+ * "sequence number" field, even when error detection is enabled, but would 
+ * include a "checksum" field since checksums are in use.
+ *
+ * Voyager specific information:
+ * - Voyager does not seem to support this
+ *
+ * @see parse()
+ * @see parse_msg96()
+ *
+ * @param $fields = null
+ *  an array of fields. This message does not take fields, however the function 
+ *  takes an argument to keep its header identical to the rest of the message generating function.
+ *
+ * @return
+ *  a formatted string for Request Resend
+ */
+function sipapi_msg97($fields = null) {
+  $msg = '97';
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+/**
+ * Format a Client Status (Message 99)
+ *
+ * The client status message sends client status to the server. It requires a 
+ * Server Status Response message reply from the server. This message will be 
+ * the first message sent by the client to the server once a connection has 
+ * been established (exception: the Login message may be sent first to login to 
+ * the server). The server will respond with a message that established some of 
+ * the rules to be followed by the client and establishes some parameters 
+ * needed for further communication.
+ *
+ * @see parse()
+ * @see parse_msg98()
+ *
+ * @param $fields
+ *  An array of fields. The following keys are required:
+ * - StatusCode (1-char, 0, 1, or 2)
+ * - MaxPrintWidth (3-char)
+ * - ProtocolVersion (4-char, x.xx)
+ *
+ * @return
+ *  a formatted string of Client Status
+ */
+function sipapi_msg99($fields) {
+  if (!isset($fields['StatusCode'], $fields['MaxPrintWidth'], $fields['ProtocolVersion']))
+    return FALSE;
+ 
+  // Required fields
+  $msg = '99';
+  $msg .= $fields['StatusCode'];
+  $msg .= $fields['MaxPrintWidth'];
+  $msg .= $fields['ProtocolVersion'];
+
+  // Message terminator
+  $msg .= "\r";
+
+  return $msg;
+}
+
+
+/**
+ * Parse Checkin Response (Message 10) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Checkin Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg10($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['Ok'] = substr($msg, 2, 1);
+  $r['Resensitize'] = substr($msg, 3, 1);
+  $r['MagneticMedia'] = substr($msg, 4, 1);
+  $r['Alert'] = substr($msg, 5, 1);
+  $r['TransactionDate'] = substr($msg, 6, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 24));
+
+  return $r;
+}
+
+
+/**
+ * Parse a Checkout Response (Message 12) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Checkout Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg12($msg) {
+  $r = array();
+
+  // Fixed fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['Ok'] = substr($msg, 2, 1);
+  $r['RenewalOk'] = substr($msg, 3, 1);
+  $r['MagneticMedia'] = substr($msg, 4, 1);
+  $r['Desensentize'] = substr($msg, 5, 1);
+  $r['TransactionDate'] = substr($msg, 6, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 24));
+
+  return $r;
+}
+
+/**
+ * Parse a Hold Response (Message 16) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Hold Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg16($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['Ok'] = substr($msg, 2, 1);
+  $r['Available'] = substr($msg, 3, 1);
+  $r['TransactionDate'] = substr($msg, 4, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 22));
+
+  return $r;
+}
+
+/* *
+ * Parse an Item Information Response (Message 18) and convert to an
+ * associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Item Information Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg18($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['CirculationStatus'] = substr($msg, 2, 2);
+  $r['SecurityMarker'] = substr($msg, 4, 2);
+  $r['FeeType'] = substr($msg, 6, 2);
+  $r['TransactionDate'] = substr($msg, 8, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 26));
+
+  return $r;
+}
+
+/**
+ * Parse an Item Status Update Response (Message 20) and convert to an
+ * associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Item Status Update Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg20($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['ItemPropertiesOk'] = substr($msg, 2, 1);
+  $r['TransactionDate'] = substr($msg, 3, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 21));
+
+  return $r;
+}
+
+/*
+ * Parse a Patron Status Response (Message 24) and convert to an associative
+ * array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Patron Status Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg24($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['PatronStatus'] = sipapi_parse_patron_status(substr($msg, 2, 14));
+  $r['Language'] = substr($msg, 16, 3);
+  $r['TransactionDate'] = substr($msg, 19, 18);
+
+  // Fields with identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 37));
+
+  return $r;
+}
+
+/**
+ * Parse a Patron Enable Response (Message 26) and convert to an associative
+ * array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Patron Enable Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg26($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['PatronStatus'] = sipapi_parse_patron_status(substr($msg, 2, 14));
+  $r['Language'] = substr($msg, 16, 3);
+  $r['TransactionDate'] = subtr($msg, 19, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 37));
+
+  return $r;
+}
+
+/**
+ * Parse a Renew Response (Message 30) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Renew Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg30($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['Ok'] = substr($msg, 2, 1);
+  $r['RenewalOk'] = substr($msg, 3, 1);
+  $r['MagneticMedia'] = substr($msg, 4, 1);
+  $r['Desensitize'] = substr($msg, 5, 1);
+  $r['TransactionDate'] = substr($msg, 6, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 24));
+
+  return $r;
+}
+
+/**
+ * Parse an End Session Response (Message 36) and convert to an associative
+ * array
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of End Session Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg36($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['EndSession'] = substr($msg, 2, 1);
+  $r['TransactionDate'] = substr($msg, 3, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 21));
+
+  return $r;
+}
+
+/**
+ * Parse a Fee Paid Response (Message 38) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Fee Paid Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg38($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['PaymentAccepted'] = substr($msg, 2, 1);
+  $r['TransactionDate'] = substr($msg, 3, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 21));
+
+  return $r;
+}
+
+/**
+ * Parse a Patron Information Response (Message 64) and convert to an
+ * associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Patron Information Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg64($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['PatronStatus'] = sipapi_parse_patron_status(substr($msg, 2, 14));
+  $r['Language'] = substr($msg, 16, 3);
+  $r['TransactionDate'] = substr($msg, 19, 18);
+  $r['HoldItemsCount'] = substr($msg, 37, 4);
+  $r['OverdueItemsCount'] = substr($msg, 41, 4);
+  $r['ChargedItemsCount'] = substr($msg, 45, 4);
+  $r['FineItemsCount'] = substr($msg, 49, 4);
+  $r['RecallItemsCount'] = substr($msg, 53, 4);
+  $r['UnavailableItemsCount'] = substr($msg, 57, 4);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 61));
+
+  return $r;
+}
+
+/**
+ * Parse a Renew All Response (Message 66) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Renew All Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg66($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['Ok'] = substr($msg, 2, 1);
+  $r['RenewedCount'] = substr($msg, 3, 4);
+  $r['UnrenewedCount'] = substr($msg, 7, 4);
+  $r['TransactionDate'] = substr($msg, 11, 18);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 29));
+
+  return $r;
+}
+
+/**
+ * Parse a Login Response (Message 94) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Login Response
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg94($msg) {
+  $r = array();
+  
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['Ok'] = substr($msg, 2, 1);
+
+  return $r;
+}
+
+/**
+ * Parse a Client Resend (Message 96) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Client Resend
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg96($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0 , 2);
+
+  return $r;
+}
+
+/**
+ * Parse Server Status (Message 98) and convert to an associative array.
+ *
+ * @see parse()
+ *
+ * @param $msg
+ *  a string of Server Status
+ *
+ * @return
+ *  an associative array representing the message.
+ */
+function sipapi_parse_msg98($msg) {
+  $r = array();
+
+  // Fixed Fields
+  $r['MessageId'] = substr($msg, 0, 2);
+  $r['OnlineStatus'] = substr($msg, 2, 1);
+  $r['CheckinOk'] = substr($msg, 3, 1);
+  $r['CheckoutOk'] = substr($msg, 4, 1);
+  $r['ACSRenewalPolicy'] = substr($msg, 5, 1);
+  $r['StatusUpdateOk'] = substr($msg, 6, 1);
+  $r['OfflineOk'] = substr($msg, 7, 1);
+  $r['TimeoutPeriod'] = substr($msg, 8, 3);
+  $r['RetriesAllowed'] = substr($msg, 11, 3);
+  $r['DateTimeSync'] = substr($msg, 14, 18);
+  $r['ProtocolVersion'] = substr($msg, 32, 4);
+
+  // Fields with Identifiers
+  $r += sipapi_parse_optional_fields(substr($msg, 36));
+
+  // Pretify the supported messages
+  if (isset($r['BX']))
+    $r['BX'] = sipapi_parse_supported_messages($r['BX']);
+
+  return $r;
+}
+
+
+/**
+ * Parse Patron Status field into an associative array.
+ *
+ * @see sipapi_parse_msg24()
+ * @see sipapi_parse_msg26()
+ * @see sipapi_parse_msg64()
+ *
+ * @param $msg
+ *  A 14 character string of Patron Status field.
+ *
+ * @return
+ *  an associative array representing the given Patron Status field.
+ */
+function sipapi_parse_patron_status($msg) {
+  $r = array();
+  // Patron Status
+  $r['ChargePrivilegesDenied'] = ($msg[0] == 'Y') ? 'Y' : 'N';
+  $r['RenewalPrivilegesDenied'] = ($msg[1] == 'Y') ? 'Y' : 'N';
+  $r['RecallPrivilegesDenied'] = ($msg[2] == 'Y') ? 'Y' : 'N';
+  $r['HoldPrivilegesDenied'] = ($msg[3] == 'Y') ? 'Y' : 'N';
+  $r['CardReportedLost'] = ($msg[4] == 'Y') ? 'Y' : 'N';
+  $r['TooManyItemsCharged'] = ($msg[5] == 'Y') ? 'Y' : 'N';
+  $r['TooManyItemsOverdue'] = ($msg[6] == 'Y') ? 'Y' : 'N';
+  $r['TooManyRenewals'] = ($msg[7] == 'Y') ? 'Y' : 'N';
+  $r['TooManyClaimsOfItemsReturned'] = ($msg[8] == 'Y') ? 'Y' : 'N';
+  $r['TooManyItemsLost'] = ($msg[9] == 'Y') ? 'Y' : 'N';
+  $r['ExcessiveOutstandingFines'] = ($msg[10] == 'Y') ? 'Y' : 'N';
+  $r['ExcessiveOutstandingFees'] = ($msg[11] == 'Y') ? 'Y' : 'N';
+  $r['RecallOverdue'] = ($msg[12] == 'Y') ? 'Y' : 'N';
+  $r['TooManyItemsBilled'] = ($msg[13] == 'Y') ? 'Y' : 'N';
+
+  return $r;
+}
+
+/**
+ * Parse Supported Messages field into an associative array.
+ *
+ * @see sipapi_parse_msg98()
+ *
+ * @param $msg
+ *  a 16 character string for Supported Messages
+ *
+ * @return
+ *  an associative array representing the Supported Messages field.
+ */
+function sipapi_parse_supported_messages($msg) {
+  $r = array();
+
+  // Supported Messages
+  $r['PatronStatusRequest'] = ($msg[0] == 'Y') ? 'Y' : 'N';
+  $r['Checkout'] = ($msg[1] == 'Y') ? 'Y' : 'N';
+  $r['Checkin'] = ($msg[2] == 'Y') ? 'Y' : 'N';
+  $r['BlockPatron'] = ($msg[3] == 'Y') ? 'Y' : 'N';
+  $r['SCACSStatus'] = ($msg[4] == 'Y') ? 'Y' : 'N';
+  $r['RequestSCACSResend'] = ($msg[5] == 'Y') ? 'Y' : 'N';
+  $r['Login'] = ($msg[6] == 'Y') ? 'Y' : 'N';
+  $r['PatronInformation'] = ($msg[7] == 'Y') ? 'Y' : 'N';
+  $r['EndPatronSession'] = ($msg[8] == 'Y') ? 'Y' : 'N';
+  $r['FeePaid'] = ($msg[9] == 'Y') ? 'Y' : 'N';
+  $r['ItemInformation'] = ($msg[10] == 'Y') ? 'Y' : 'N';
+  $r['ItemStatusUpdate'] = ($msg[11] == 'Y') ? 'Y' : 'N';
+  $r['PatronEnable'] = ($msg[12] == 'Y') ? 'Y' : 'N';
+  $r['Hold'] = ($msg[13] == 'Y') ? 'Y' : 'N';
+  $r['Renew'] = ($msg[14] == 'Y') ? 'Y' : 'N';
+  $r['RenewAll'] = ($msg[15] == 'Y') ? 'Y' : 'N';
+
+  return $r;
+}
+
+/**
+ * Parse substring of a message and convert to an associated array. The
+ * substring must contain only fields with field identifiers. Each field must
+ * begin with a 2 character field identifier followed by an arbitrary length
+ * value that is delimited with a |.
+ *
+ * @param $msg
+ *  a substring of a message. Must only contain fields with identifiers.
+ *
+ * @return
+ *  an associative array representing $msg.
+ */
+function sipapi_parse_optional_fields($msg) {
+  $r = array();
+  $matches = array();
+  preg_match_all('/([A-Z]{2})([^|]*)\|/', $msg, $matches);
+
+  $variableLengthFields = array('AS', 'AT', 'AU', 'AV', 'BU', 'CD', 'AF');
+
+  for ($i = 0; $i < count($matches[0]); $i++) {
+    // Uncomment if you want empty fields to be ommited.
+    // if (empty($matches[2][$i])) continue;
+
+    // Check to see if this key may contain multiple values
+    if (in_array($matches[1][$i], $variableLengthFields)) {
+      // Append the value to the array
+      $r[$matches[1][$i]][] = trim($matches[2][$i]);
+      continue;
+    }
+
+    // Single key/value pair. 
+    $r[$matches[1][$i]] = $matches[2][$i];
+  }
+
+  return $r;
+}

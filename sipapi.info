@@ -1,0 +1,4 @@
+; $Id$
+name = Standard Interchange Protocol API
+description = "API for SIP."
+package = Library
