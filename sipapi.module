@@ -52,7 +52,7 @@ function sipapi_send_message($socket, $msg) {
  * @return
  *  0 on success, or -1 on error.
  */
-function sipapi_send($socket, $msg) {
+function sipapi_send($socket, $msg, $verbose = FALSE) {
   if (!$socket) {
     return -1;
   }
@@ -69,7 +69,7 @@ function sipapi_send($socket, $msg) {
     $bytesleft -= $n;
   }
 
-  if (variable_get('sipapi_verbose', 'FALSE') === TRUE) {
+  if ($verbose) {
     print "Send: $msg\n";
   }
 
@@ -86,11 +86,11 @@ function sipapi_send($socket, $msg) {
  *  the data as a string on success, or FALSE on error.
  *  *****ON ERROR IS NOT TRUE*********
  */
-function sipapi_recv($socket) {
+function sipapi_recv($socket, $verbose = FALSE) {
   $msg = socket_read($socket, 1000000, PHP_NORMAL_READ);
   variable_set('sipapi_last_message', $msg);
 
-  if (variable_get('sipapi_verbose', 'FALSE') === TRUE) {
+  if ($verbose) {
     print "Recv: $msg\n";
   }
 
